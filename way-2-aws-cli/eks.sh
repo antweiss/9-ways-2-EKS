@@ -1,4 +1,5 @@
 #! /bin/sh -f
+## Create an EKS cluster witha NodeGroup using AWS CLI v2
 if [ -z "${AWS_REGION" ]; then
    echo "AWS_REGION is unset or empty"
    exit 1
