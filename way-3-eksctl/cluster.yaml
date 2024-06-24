@@ -1,0 +1,38 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: way3
+  region: eu-central-1
+  tags:
+    karpenter.sh/discovery: way3
+iam:
+  withOIDC: true
+
+managedNodeGroups:
+  - name: ng-1
+    labels: { role: worker }
+    instanceType: t2.medium
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 3
+    tags:
+      nodegrouprole: way3
+    volumeSize: 20
+    iam:
+      withAddonPolicies:
+        externalDNS: true
+        certManager: true
+        awsLoadBalancerController: true
+        albIngress: true
+        ebs: true
+        efs: true
+        imageBuilder: true
+        cloudWatch: true
+    ssh:
+      allow: true # will use ~/.ssh/id_rsa.pub as the default ssh key
+
+karpenter:
+  version: '0.37.0'
+  createServiceAccount: true
+  withSpotInterruptionQueue: true 
