@@ -1,0 +1,515 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EKS Managed Nodes (SSH access: true) [created by eksctl]'
+Parameters:
+  ClusterStack:
+    Description: Name of the ClusterStack
+    Type: String
+    Default: eks-way4
+Mappings:
+  ServicePrincipalPartitionMap:
+    aws:
+      EC2: ec2.amazonaws.com
+      EKS: eks.amazonaws.com
+      EKSFargatePods: eks-fargate-pods.amazonaws.com
+Resources:
+  ImportedKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Ref AWS::StackName
+      PublicKeyMaterial: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN1+2DoLIKJQHPAyHiK3MCX40udVhsIEjbH8H9r+qznv eks-way4 
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              Iops: 3000
+              Throughput: 125
+              VolumeSize: 20
+              VolumeType: gp3
+        KeyName: !Ref AWS::StackName
+        MetadataOptions:
+          HttpPutResponseHopLimit: 2
+          HttpTokens: required
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub '${ClusterStack}::ClusterSecurityGroupId'
+          - !Ref SSH
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}-Node
+              - Key: alpha.eksctl.io/nodegroup-type
+                Value: managed
+              - Key: karpenter.sh/discovery
+                Value: !Ref AWS::StackName
+              - Key: nodegrouprole
+                Value: !Ref AWS::StackName
+              - Key: alpha.eksctl.io/nodegroup-name
+                Value: ng-1
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}-Node
+              - Key: alpha.eksctl.io/nodegroup-type
+                Value: managed
+              - Key: karpenter.sh/discovery
+                Value: !Ref AWS::StackName
+              - Key: nodegrouprole
+                Value: !Ref AWS::StackName
+              - Key: alpha.eksctl.io/nodegroup-name
+                Value: ng-1
+          - ResourceType: network-interface
+            Tags:
+              - Key: Name
+                Value: !Sub ${AWS::StackName}-Node
+              - Key: alpha.eksctl.io/nodegroup-type
+                Value: managed
+              - Key: karpenter.sh/discovery
+                Value: !Ref AWS::StackName
+              - Key: nodegrouprole
+                Value: !Ref AWS::StackName
+              - Key: alpha.eksctl.io/nodegroup-name
+                Value: ng-1
+      LaunchTemplateName: !Sub ${AWS::StackName}
+  ManagedNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      AmiType: AL2023_x86_64_STANDARD
+      ClusterName: !Ref ClusterStack 
+      InstanceTypes:
+        - t2.medium
+      Labels:
+        alpha.eksctl.io/cluster-name: !Ref ClusterStack
+        alpha.eksctl.io/nodegroup-name: ng-1
+        role: worker
+      LaunchTemplate:
+        Id: !Ref LaunchTemplate
+      NodeRole: !GetAtt NodeInstanceRole.Arn
+      NodegroupName: ng-1
+      ScalingConfig:
+        DesiredSize: 1
+        MaxSize: 5
+        MinSize: 1
+      Subnets:
+        - !Select [0, !Split [",", Fn::ImportValue: { Fn::Sub: "${ClusterStack}::SubnetsPublic" }]]
+        - !Select [1, !Split [",", Fn::ImportValue: { Fn::Sub: "${ClusterStack}::SubnetsPublic" }]]
+        - !Select [2, !Split [",", Fn::ImportValue: { Fn::Sub: "${ClusterStack}::SubnetsPublic" }]]
+      Tags:
+        alpha.eksctl.io/nodegroup-name: ng-1
+        alpha.eksctl.io/nodegroup-type: managed
+        karpenter.sh/discovery: !Ref AWS::StackName
+        nodegrouprole: !Ref AWS::StackName
+      UpdateConfig:
+        MaxUnavailablePercentage: 50
+  NodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !FindInMap
+                  - ServicePrincipalPartitionMap
+                  - !Ref AWS::Partition
+                  - EC2
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEKS_CNI_Policy
+      Path: /
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}/NodeInstanceRole
+  PolicyAWSLoadBalancerController:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - iam:CreateServiceLinkedRole
+            Condition:
+              StringEquals:
+                iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:DescribeAccountAttributes
+              - ec2:DescribeAddresses
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeInternetGateways
+              - ec2:DescribeVpcs
+              - ec2:DescribeVpcPeeringConnections
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeInstances
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeTags
+              - ec2:GetCoipPoolUsage
+              - ec2:DescribeCoipPools
+              - elasticloadbalancing:DescribeLoadBalancers
+              - elasticloadbalancing:DescribeLoadBalancerAttributes
+              - elasticloadbalancing:DescribeListeners
+              - elasticloadbalancing:DescribeListenerCertificates
+              - elasticloadbalancing:DescribeSSLPolicies
+              - elasticloadbalancing:DescribeRules
+              - elasticloadbalancing:DescribeTargetGroups
+              - elasticloadbalancing:DescribeTargetGroupAttributes
+              - elasticloadbalancing:DescribeTargetHealth
+              - elasticloadbalancing:DescribeTags
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - cognito-idp:DescribeUserPoolClient
+              - acm:ListCertificates
+              - acm:DescribeCertificate
+              - iam:ListServerCertificates
+              - iam:GetServerCertificate
+              - waf-regional:GetWebACL
+              - waf-regional:GetWebACLForResource
+              - waf-regional:AssociateWebACL
+              - waf-regional:DisassociateWebACL
+              - wafv2:GetWebACL
+              - wafv2:GetWebACLForResource
+              - wafv2:AssociateWebACL
+              - wafv2:DisassociateWebACL
+              - shield:GetSubscriptionState
+              - shield:DescribeProtection
+              - shield:CreateProtection
+              - shield:DeleteProtection
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:CreateSecurityGroup
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:CreateTags
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+              StringEquals:
+                ec2:CreateAction: CreateSecurityGroup
+            Effect: Allow
+            Resource: !Sub arn:${AWS::Partition}:ec2:*:*:security-group/*
+          - Action:
+              - ec2:CreateTags
+              - ec2:DeleteTags
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'true'
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+            Effect: Allow
+            Resource: !Sub arn:${AWS::Partition}:ec2:*:*:security-group/*
+          - Action:
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:DeleteSecurityGroup
+            Condition:
+              'Null':
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - elasticloadbalancing:CreateLoadBalancer
+              - elasticloadbalancing:CreateTargetGroup
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - elasticloadbalancing:CreateListener
+              - elasticloadbalancing:DeleteListener
+              - elasticloadbalancing:CreateRule
+              - elasticloadbalancing:DeleteRule
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - elasticloadbalancing:AddTags
+              - elasticloadbalancing:RemoveTags
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'true'
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+            Effect: Allow
+            Resource:
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:targetgroup/*/*
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:loadbalancer/net/*/*
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:loadbalancer/app/*/*
+          - Action:
+              - elasticloadbalancing:AddTags
+              - elasticloadbalancing:RemoveTags
+            Effect: Allow
+            Resource:
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:listener/net/*/*/*
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:listener/app/*/*/*
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:listener-rule/net/*/*/*
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:listener-rule/app/*/*/*
+          - Action:
+              - elasticloadbalancing:ModifyLoadBalancerAttributes
+              - elasticloadbalancing:SetIpAddressType
+              - elasticloadbalancing:SetSecurityGroups
+              - elasticloadbalancing:SetSubnets
+              - elasticloadbalancing:DeleteLoadBalancer
+              - elasticloadbalancing:ModifyTargetGroup
+              - elasticloadbalancing:ModifyTargetGroupAttributes
+              - elasticloadbalancing:DeleteTargetGroup
+            Condition:
+              'Null':
+                aws:ResourceTag/elbv2.k8s.aws/cluster: 'false'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - elasticloadbalancing:AddTags
+            Condition:
+              'Null':
+                aws:RequestTag/elbv2.k8s.aws/cluster: 'false'
+              StringEquals:
+                elasticloadbalancing:CreateAction:
+                  - CreateTargetGroup
+                  - CreateLoadBalancer
+            Effect: Allow
+            Resource:
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:targetgroup/*/*
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:loadbalancer/net/*/*
+              - !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:loadbalancer/app/*/*
+          - Action:
+              - elasticloadbalancing:RegisterTargets
+              - elasticloadbalancing:DeregisterTargets
+            Effect: Allow
+            Resource: !Sub arn:${AWS::Partition}:elasticloadbalancing:*:*:targetgroup/*/*
+          - Action:
+              - elasticloadbalancing:SetWebAcl
+              - elasticloadbalancing:ModifyListener
+              - elasticloadbalancing:AddListenerCertificates
+              - elasticloadbalancing:RemoveListenerCertificates
+              - elasticloadbalancing:ModifyRule
+            Effect: Allow
+            Resource: '*'
+        Version: '2012-10-17'
+      PolicyName: !Sub ${AWS::StackName}-PolicyAWSLoadBalancerController
+      Roles:
+        - !Ref NodeInstanceRole
+  PolicyCertManagerChangeSet:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - route53:ChangeResourceRecordSets
+            Effect: Allow
+            Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/*
+        Version: '2012-10-17'
+      PolicyName: !Sub ${AWS::StackName}-PolicyCertManagerChangeSet
+      Roles:
+        - !Ref NodeInstanceRole
+  PolicyCertManagerGetChange:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - route53:GetChange
+            Effect: Allow
+            Resource: !Sub arn:${AWS::Partition}:route53:::change/*
+        Version: '2012-10-17'
+      PolicyName: !Sub ${AWS::StackName}-PolicyCertManagerGetChange
+      Roles:
+        - !Ref NodeInstanceRole
+  PolicyCertManagerHostedZones:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - route53:ListResourceRecordSets
+              - route53:ListHostedZonesByName
+            Effect: Allow
+            Resource: '*'
+        Version: '2012-10-17'
+      PolicyName: !Sub ${AWS::StackName}-PolicyCertManagerHostedZones
+      Roles:
+        - !Ref NodeInstanceRole
+  PolicyEBS:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - ec2:CreateSnapshot
+              - ec2:AttachVolume
+              - ec2:DetachVolume
+              - ec2:ModifyVolume
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeInstances
+              - ec2:DescribeSnapshots
+              - ec2:DescribeTags
+              - ec2:DescribeVolumes
+              - ec2:DescribeVolumesModifications
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:CreateTags
+            Condition:
+              StringEquals:
+                ec2:CreateAction:
+                  - CreateVolume
+                  - CreateSnapshot
+            Effect: Allow
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:*:*:volume/*
+              - !Sub arn:${AWS::Partition}:ec2:*:*:snapshot/*
+          - Action:
+              - ec2:DeleteTags
+            Effect: Allow
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:*:*:volume/*
+              - !Sub arn:${AWS::Partition}:ec2:*:*:snapshot/*
+          - Action:
+              - ec2:CreateVolume
+            Condition:
+              StringLike:
+                aws:RequestTag/ebs.csi.aws.com/cluster: 'true'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:CreateVolume
+            Condition:
+              StringLike:
+                aws:RequestTag/CSIVolumeName: '*'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:DeleteVolume
+            Condition:
+              StringLike:
+                ec2:ResourceTag/ebs.csi.aws.com/cluster: 'true'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:DeleteVolume
+            Condition:
+              StringLike:
+                ec2:ResourceTag/CSIVolumeName: '*'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:DeleteVolume
+            Condition:
+              StringLike:
+                ec2:ResourceTag/kubernetes.io/created-for/pvc/name: '*'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:DeleteSnapshot
+            Condition:
+              StringLike:
+                ec2:ResourceTag/CSIVolumeSnapshotName: '*'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+              - ec2:DeleteSnapshot
+            Condition:
+              StringLike:
+                ec2:ResourceTag/ebs.csi.aws.com/cluster: 'true'
+            Effect: Allow
+            Resource: '*'
+        Version: '2012-10-17'
+      PolicyName: !Sub ${AWS::StackName}-PolicyEBS
+      Roles:
+        - !Ref NodeInstanceRole
+  PolicyEFS:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - elasticfilesystem:*
+            Effect: Allow
+            Resource: '*'
+        Version: '2012-10-17'
+      PolicyName: !Sub ${AWS::StackName}-PolicyEFS
+      Roles:
+        - !Ref NodeInstanceRole
+  PolicyEFSEC2:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - ec2:DescribeSubnets
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+              - ec2:ModifyNetworkInterfaceAttribute
+              - ec2:DescribeNetworkInterfaceAttribute
+            Effect: Allow
+            Resource: '*'
+        Version: '2012-10-17'
+      PolicyName: !Sub ${AWS::StackName}-PolicyEFSEC2
+      Roles:
+        - !Ref NodeInstanceRole
+  PolicyExternalDNSChangeSet:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - route53:ChangeResourceRecordSets
+            Effect: Allow
+            Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/*
+        Version: '2012-10-17'
+      PolicyName: !Sub ${AWS::StackName}-PolicyExternalDNSChangeSet
+      Roles:
+        - !Ref NodeInstanceRole
+  PolicyExternalDNSHostedZones:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - route53:ListHostedZones
+              - route53:ListResourceRecordSets
+              - route53:ListTagsForResource
+            Effect: Allow
+            Resource: '*'
+        Version: '2012-10-17'
+      PolicyName: !Sub ${AWS::StackName}-PolicyExternalDNSHostedZones
+      Roles:
+        - !Ref NodeInstanceRole
+  SSH:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH access
+      GroupName: !Sub ${AWS::StackName}-remoteAccess
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow SSH access to managed worker nodes in group ng-1
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+        - CidrIpv6: '::/0'
+          Description: Allow SSH access to managed worker nodes in group ng-1
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}/SSH
+      VpcId: 
+        Fn::ImportValue: 
+          !Sub '${ClusterStack}::VPC'
